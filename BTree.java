@@ -93,7 +93,7 @@ public class BTree<K extends Comparable<? super K>, V> extends java.util.Abstrac
         }
 
         /** Inserts the given key/value pair in a leaf node. */
-        public void insert(int ind, K key, V value) {
+        public LeafEntry<K,V> insert(int ind, K key, V value) {
             throw new UnsupportedOperationException("insertions can only happen in leaf nodes");
         }
 
@@ -160,8 +160,10 @@ public class BTree<K extends Comparable<? super K>, V> extends java.util.Abstrac
         }
 
         @Override
-        public void insert(int ind, K key, V value) {
-            add(ind, new LeafEntry<>(key, value));
+        public LeafEntry<K,V> insert(int ind, K key, V value) {
+            LeafEntry<K,V> res = new LeafEntry<>(key, value);
+            add(ind, res);
+            return res;
         }
 
         @Override
@@ -257,6 +259,10 @@ public class BTree<K extends Comparable<? super K>, V> extends java.util.Abstrac
       this.ht = 0;
     }
 
+    /** Finds the node entry containing the given search key.
+     * The tree is never modified.
+     * @return A key/value pair whose key evaluates equal to needle, or null if not found.
+     */
     protected LeafEntry<K,V> search(Comparable<? super K> needle) {
         Node<K,V,?> cur = this.root;
 
@@ -274,11 +280,38 @@ public class BTree<K extends Comparable<? super K>, V> extends java.util.Abstrac
         return null;
     }
 
+    // annoying unchecked conversion because Map specifies the key has type Object
+    @SuppressWarnings("unchecked")
     protected LeafEntry<K,V> search(Object key) {
-        // annoying unchecked conversion because Map specifies the key has type Object
-        @SuppressWarnings("unchecked")
-        Comparable<? super K> needle = (Comparable<? super K>) key;
-        return search(needle);
+        return search((Comparable<? super K>) key);
+    }
+
+    /** Finds an entry for the given key, splitting and inserting if necessary.
+     * @return An entry for this key in the tree, guaranteed not null.
+     */
+    protected LeafEntry<K,V> insert(K key) {
+        // check if we need to split the root
+        if (this.root.isFull()) {
+            InternalNode<K,V> newRoot = new InternalNode<>(this.root);
+            newRoot.add(this.root.split());
+            this.root = newRoot;
+            ++this.ht;
+        }
+
+        Node<K,V,?> cur = this.root;
+
+        // not an infinite loop, because it will eventually get to a leaf node
+        while (true) {
+            assert ! cur.isFull();
+
+            int ind = cur.searchAndSplit(key);
+            if (ind >= 0) return cur.get(ind); // found it
+
+            // at the leaf level, just insert
+            if (cur.isLeaf()) return cur.insert(-ind - 1, key, null);
+
+            cur = cur.getChild(-ind - 2); // note, child indices start from -1
+        }
     }
 
     @Override
@@ -298,43 +331,13 @@ public class BTree<K extends Comparable<? super K>, V> extends java.util.Abstrac
         // putting a null value is the same as removal, but removal is faster (no splitting)
         if (value == null) return this.remove(key);
 
-        // check if we need to split the root
-        if (this.root.isFull()) {
-            InternalNode<K,V> newRoot = new InternalNode<>(this.root);
-            newRoot.add(this.root.split());
-            this.root = newRoot;
-            ++this.ht;
-        }
-
-        Node<K,V,?> cur = this.root;
-
-        // not an infinite loop, because it will eventually get to a leaf node
-        while (true) {
-            assert ! cur.isFull();
-
-            int ind = cur.searchAndSplit(key);
-            if (ind >= 0) {
-                // found it, just replace
-                V old = cur.get(ind).setValue(value);
-                if (old == null) ++this.sz;
-                return old;
-            }
-
-            // negative index calculation if not found
-            ind = -ind - 1;
-
-            if (cur.isLeaf()) {
-                // insertion can happen directly in the leaf node
-                cur.insert(ind, key, value);
-                ++this.sz;
-                return null;
-            }
-
-            cur = cur.getChild(ind - 1); // note, child indices start from -1
-        }
+        LeafEntry<K,V> found = insert(key);
+        V old = found.setValue(value);
+        if (old == null) ++this.sz;
+        return old;
     }
 
-    // same as put(key, null) but avoids splits.
+    // equivalent to put(key, null) but avoids splits.
     @Override
     public V remove(Object key) {
         LeafEntry<K,V> found = search(key);
