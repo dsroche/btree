@@ -7,18 +7,25 @@
  * null values are _not_ allowed; setting a value to null is equivalent
  * to removing it from the map.
  *
- * Internally, a B-tree is stored as a tree of Node objects. Each Node consists
- * mostly of a list of Entry objects. In LeafNode's, each Entry is simply
- * a Key/Value pair. In InternalNode's, each Entry additionally contains a
- * pointer to the child node. This corresponds to the *right child* underneath
- * that entry. Separately, InternalNode's store a single pointer to the leftmost
- * child. Unlike some B-tree implementations, Key/Value pairs are stored both
- * in internal and in leaf nodes, without duplication, so that in particular the
- * leaf level does not contain every key/value pair in the tree.
+ * Internally, a B-tree is stored as a tree of Node objects, each of which
+ * contains a list of key/payload pairs plus one additional "left" payload.
  *
+ * For internal nodes, the payload is a child node, and the "left" payload
+ * is the leftmost child of that internal node in the tree.
+ *
+ * For leaf nodes, the payload is a value in the map, type V, and the "left"
+ * payload is the value associated to some key in an internal node ancestor;
+ * in particular, the value for the predecessor key in the tree.
+ *
+ * Due to this structure, all values are stored in the leaf nodes, but there
+ * is no duplication of keys nor of values in the entire tree.
+ *
+ * The ordering is according to the natural order of the keys, and the payload
+ * for each internal node's index i contains the subtree to the right of that
+ * node's key at index i.
  * More precisely, for any InternalNode u and index i, each key within
- * u.items[i].child is between u.items[i-1].key and u.items[i].key.
- * Each key within u.leftChild is less than u.items[0].key.
+ * u.get(i).getValue() is between u.get(i-1).getKey() and u.get(i).getKey().
+ * Each key within u.getLeft() is less than u.get(0).getKey().
  *
  * Removing the Value mapped to a given Key is supported from an interface
  * perspective, but internally this doesn't really change the tree, instead
@@ -28,219 +35,228 @@
  * full Nodes are split "on the way down" in the search path through the tree.
  * As a result, insertion only involves a single traversal down the tree and
  * O(1) temporary storage.
- *
  ******************************************************************************/
 public class BTree<K extends Comparable<? super K>, V> extends java.util.AbstractMap<K,V> {
     /** Maximum number of key/value pairs in a leaf node. */
-    public static final int LeafM = 6;
-    /** Maximum number of key/value pairs in an internal node.
-     * Should be roughly 2/3 of LeafM for the same actual node size. */
+    public static final int LeafM = 4;
+    /** Maximum number of key/child pairs in an internal node. */
     public static final int InternalM = 4;
 
-    /** A key/value pair entry in a leaf node. */
-    private static class LeafEntry<K,V> extends java.util.AbstractMap.SimpleEntry<K,V> {
-        /** prevent warning since SimpleEntry is serializable. */
+    /** A pseudo-entry whose key is in an internal node and whose value is in a leaf node. */
+    private static class InternalEntry<K extends Comparable<? super K>,V> implements Entry<K,V> {
         private static final long serialVersionUID = 1L;
 
-        public LeafEntry(K key, V value)
-        { super(key, value); }
+        private K key;
+        private LeafNode<K,V> leaf;
 
-        /** The right child of this internal node, or null for a leaf node. */
-        public Node<K,V,?> rightChild() { return null; }
-    }
-
-    /** A key/value/child triple in an internal node.
-     * Note that the first (leftmost) child is stored separately.
-     */
-    private static class InternalEntry<K,V> extends LeafEntry<K,V> {
-        /** prevent warning since SimpleEntry is serializable. */
-        private static final long serialVersionUID = 1L;
-
-        private Node<K,V,?> child;
-
-        public InternalEntry(java.util.Map.Entry<K,V> parent, Node<K,V,?> child) {
-            super(parent.getKey(), parent.getValue());
-            this.child = child;
+        public InternalEntry(K key, LeafNode<K,V> leaf) {
+            this.key = key;
+            this.leaf = leaf;
         }
 
-        /** The right child of this internal node. */
-        public Node<K,V,?> rightChild() { return this.child; }
+        @Override
+        public K getKey() { return key; }
+
+        @Override
+        public V getValue() { return leaf.getLeft(); }
+
+        @Override
+        public V setValue(V newval) { return leaf.setLeft(newval); }
     }
 
-    /** Base class for leaf and internal nodes.
-     * Mostly this consists of a list of either LeafEntry or InternalEntry objects,
-     * depending on whether it is a leaf or internal node.
+    /** A single node in the B-tree, containing keys and payloads.
+     * The payload type P should either be V for leaf nodes or Node for internal nodes.
      */
-    abstract private static class Node<K,V,E extends LeafEntry<K,V>>
-            extends java.util.ArrayList<E>
+    private static abstract class Node<K extends Comparable<? super K>,V,P>
+        extends java.util.ArrayList<Entry<K,P>>
     {
-        /** prevent warning since SimpleEntry is serializable. */
         private static final long serialVersionUID = 1L;
 
-        protected Node(int maxsize) {
+        /** holds either the parent value or the leftmost child */
+        private P left;
+
+        /** Creates a new node with the given left payload and key/payload pairs. */
+        protected Node(int maxsize, P left, java.util.Collection<? extends Entry<K,P>> entries) {
             super(maxsize);
+            this.left = left;
+            addAll(entries);
         }
 
-        abstract public boolean isLeaf();
+        public P getLeft() { return left; }
+        public P setLeft(P newleft) {
+            P old = left;
+            left = newleft;
+            return old;
+        }
 
         abstract public boolean isFull();
 
-        /** Inserts the given entry at the specified index, moving others over. */
+        /** Inserts the given payload at the specified index, moving others over. */
         @Override
-        public void add(int ind, E entry) {
+        public void add(int ind, Entry<K,P> entry) {
             assert ! this.isFull();
+            assert ind == 0 || entry.getKey().compareTo(get(ind-1).getKey()) > 0;
+            assert ind == size() || entry.getKey().compareTo(get(ind).getKey()) < 0;
             super.add(ind, entry);
         }
 
-        /** Inserts the given key/value pair in a leaf node. */
-        public LeafEntry<K,V> insert(int ind, K key, V value) {
-            throw new UnsupportedOperationException("insertions can only happen in leaf nodes");
+        /** Creates a new entry from the given key/value pair and inserts it at the given index. */
+        public Entry<K,P> insert(int ind, K key, P payload) {
+            Entry<K,P> entry = new SimpleEntry<>(key, payload);
+            add(ind, entry);
+            return entry;
         }
 
-        /** Searches for needle in the entries' keys and returns the corresponding index.
-         * If the needle is not found, a negative index i is returned such that
-         * - the needle would be inserted before index (-i - 1)
-         * - the needle would go in child index (-i - 2)
-         */
-        public int search(Comparable<? super K> needle) {
+        /** Returns the index of needle, or (-ind+1) is the index where needle should be. */
+        protected int getInd(Comparable<? super K> needle) {
             return MyCollections.binarySearch(this,
-                (java.util.Map.Entry<K,?> o) -> needle.compareTo(o.getKey()));
+                (Entry<K,?> o) -> needle.compareTo(o.getKey()));
         }
 
-        /** Similar to search, but preemtively splits the corresponding child node.
-         * If this is an internal node and the needle is not found within the
-         * node itself, it is guaranteed that the child where the needle belongs,
-         * at index (-i - 2), is not full when this method returns.
+        /** Searches for the given needle in this node or below.
+         * @return the matching key/value pair, or null if not found.
          */
-        abstract public int searchAndSplit(Comparable<? super K> needle);
+        abstract public Entry<K,V> search(Comparable<? super K> needle);
 
-        /** Retrieves the child node at the given index, starting at -1.
-         * It is guaranteed that all keys in child node at index i
-         * fall between getKey(i-1) and getKey(i).
+        /** Similar to search, but never returns null.
+         * This will split notes as needed and insert a new entry into a leaf node if necessary.
+         * Prerequisite: this node must not be full.
          */
-        abstract public Node<K,V,?> getChild(int ind);
+        abstract public Entry<K,V> searchInsert(K needle);
 
-        /** Creates a new sibling node based on the given list of entries. */
-        abstract protected Node<K,V,E> splitRight(Node<K,V,?> middleChild,
-                java.util.Collection<E> after);
+        /** Creates an Entry view of the given key by following left children to a leaf node. */
+        abstract protected InternalEntry<K,V> leftEntry(K key);
 
-        /** Splits this (full) node into two.
-         * @return a new entry to be added to the parent.
-         */
-        public InternalEntry<K,V> split() {
+        /** Creates a new sibling node based on the given payload and list of entries. */
+        abstract protected Node<K,V,P> spawn(P payload, java.util.Collection<? extends Entry<K,P>> entries);
+
+        /** Splits this node and returns the to-be-promoted entry. */
+        public Entry<K,Node<K,V,?>> split() {
             assert isFull();
             int mid = size() / 2;
-            InternalEntry<K,V> parent = new InternalEntry<>(
-                get(mid),
-                splitRight(
-                    get(mid).rightChild(),
-                    subList(mid+1, size())
-                )
-            );
+            K promoted = get(mid).getKey();
+            Node<K,V,P> sibling = spawn(get(mid).getValue(), subList(mid+1, size()));
             subList(mid, size()).clear();
-            return parent;
+            return new SimpleEntry<>(promoted, sibling);
         }
+
+        /** Pushes iterators for this node and internal nodes below, then returns leftmost leaf.
+         * Used internally by the iterator for the BTree map.
+         */
+        abstract public LeafNode<K,V> iterPush(java.util.Deque<java.util.Iterator<Entry<K,Node<K,V,?>>>> stack);
     }
 
-    private static class LeafNode<K,V> extends Node<K,V,LeafEntry<K,V>>
+    private static class LeafNode<K extends Comparable<? super K>,V>
+        extends Node<K,V,V>
     {
-        /** prevent warning since SimpleEntry is serializable. */
         private static final long serialVersionUID = 1L;
+        public static final int M = BTree.LeafM;
 
-        public LeafNode() {
-            super(BTree.LeafM);
+        /** Creates a new sibling leaf node with the given parent value and key/value pairs. */
+        public LeafNode(V parentVal, java.util.Collection<? extends Entry<K,V>> entries)
+        { super(M, parentVal, entries); }
+
+        @Override
+        public boolean isFull()
+        { return this.size() == M; }
+
+        @Override
+        public Entry<K,V> search(Comparable<? super K> needle) {
+            int ind = getInd(needle);
+            if (ind >= 0) return get(ind);
+            else return null;
         }
 
         @Override
-        public boolean isLeaf() { return true; }
-
-        @Override
-        public boolean isFull() {
-            return this.size() == BTree.LeafM;
+        public Entry<K,V> searchInsert(K needle) {
+            assert !isFull();
+            int ind = getInd(needle);
+            if (ind >= 0) return get(ind);
+            else return insert(-ind-1, needle, null);
         }
 
         @Override
-        public LeafEntry<K,V> insert(int ind, K key, V value) {
-            LeafEntry<K,V> res = new LeafEntry<>(key, value);
-            add(ind, res);
-            return res;
+        protected InternalEntry<K,V> leftEntry(K key) {
+            return new InternalEntry<>(key, this);
         }
 
         @Override
-        public int searchAndSplit(Comparable<? super K> needle) {
-            // no pre-emptive splitting to do in leaf nodes
-            return search(needle);
+        protected LeafNode<K,V> spawn(V payload, java.util.Collection<? extends Entry<K,V>> entries) {
+            return new LeafNode<>(payload, entries);
         }
 
         @Override
-        public Node<K,V,?> getChild(int ind) { return null; }
-
-        @Override
-        protected LeafNode<K,V> splitRight(Node<K,V,?> middleChild,
-                java.util.Collection<LeafEntry<K,V>> after)
-        {
-            assert middleChild == null;
-            LeafNode<K,V> right = new LeafNode<>();
-            right.addAll(after);
-            return right;
+        public LeafNode<K,V> iterPush(java.util.Deque<java.util.Iterator<Entry<K,Node<K,V,?>>>> stack) {
+            return this;
         }
     }
 
-    private static final class InternalNode<K,V> extends Node<K,V,InternalEntry<K,V>> {
-        /** prevent warning since SimpleEntry is serializable. */
+    private static class InternalNode<K extends Comparable<? super K>,V>
+        extends Node<K,V,Node<K,V,?>>
+    {
         private static final long serialVersionUID = 1L;
+        public static final int M = BTree.InternalM;
 
-        private Node<K,V,?> leftChild;
+        /** Creates a new sibling node with the given left child and list of key/children pairs. */
+        public InternalNode(Node<K,V,?> leftChild, java.util.Collection<? extends Entry<K,Node<K,V,?>>> entries)
+        { super(M, leftChild, entries); }
 
-        public InternalNode(Node<K,V,?> left) {
-            super(BTree.InternalM);
-            leftChild = left;
+        @Override
+        public boolean isFull()
+        { return this.size() == M; }
+
+        @Override
+        public Entry<K,V> search(Comparable<? super K> needle) {
+            int ind = getInd(needle);
+            if (ind >= 0)
+                return get(ind).getValue().leftEntry(get(ind).getKey());
+            else if (ind == -1)
+                return getLeft().search(needle);
+            else return get(-ind-2).getValue().search(needle);
         }
 
         @Override
-        public boolean isLeaf() { return false; }
+        public Entry<K,V> searchInsert(K needle) {
+            assert !isFull();
+            int ind = getInd(needle);
+            if (ind >= 0) return get(ind).getValue().leftEntry(get(ind).getKey());
 
-        @Override
-        public boolean isFull() {
-            return this.size() == BTree.InternalM;
+            Node<K,V,?> child = (ind == -1) ? getLeft() : get(-ind-2).getValue();
+            int insInd = -ind - 1;
+
+            if (child.isFull()) {
+                Entry<K,Node<K,V,?>> newEnt = child.split();
+                K promoted = newEnt.getKey();
+                Node<K,V,?> newChild = newEnt.getValue();
+                add(insInd, newEnt);
+                int cmp = needle.compareTo(promoted);
+                if (cmp == 0) return newChild.leftEntry(promoted);
+                else if (cmp > 0) child = newChild;
+            }
+
+            return child.searchInsert(needle);
         }
 
         @Override
-        public int searchAndSplit(Comparable<? super K> needle) {
-            // do a regular search, and return index if found
-            int sind = search(needle);
-            if (sind >= 0) return sind;
-
-            // lookup child and return search index if it is not full
-            int cind = -sind - 2;
-            Node<K,V,?> curChild = getChild(cind);
-            if (!curChild.isFull()) return sind;
-
-            // split the full child, then compare with promoted key to get final result
-            this.add(cind+1, curChild.split());
-            int cmp = needle.compareTo(get(cind+1).getKey());
-            if (cmp == 0) return cind+1; // found here, so return positive key index
-            else if (cmp < 0) return sind; // not found, return negative child index
-            else return sind-1; // not found, return negative child index
-        }
+        protected InternalEntry<K,V> leftEntry(K key)
+        { return getLeft().leftEntry(key); }
 
         @Override
-        public Node<K,V,?> getChild(int ind) {
-            if (ind == -1) return leftChild;
-            else return get(ind).rightChild();
-        }
-
-        @Override
-        protected InternalNode<K,V> splitRight(Node<K,V,?> middleChild,
-                java.util.Collection<InternalEntry<K,V>> after)
+        protected InternalNode<K,V> spawn
+            (Node<K,V,?> payload,
+             java.util.Collection<? extends Entry<K,Node<K,V,?>>> entries)
         {
-            InternalNode<K,V> right = new InternalNode<>(middleChild);
-            right.addAll(after);
-            return right;
+            return new InternalNode<>(payload, entries);
+        }
+
+        @Override
+        public LeafNode<K,V> iterPush(java.util.Deque<java.util.Iterator<Entry<K,Node<K,V,?>>>> stack) {
+            stack.addLast(iterator());
+            return getLeft().iterPush(stack);
         }
     }
 
-    private Node<K,V,?> root = new LeafNode<K,V>();
+    private Node<K,V,?> root = new LeafNode<>(null, java.util.Collections.emptyList());
     private int ht = 0;
     private int sz = 0;
 
@@ -254,64 +270,15 @@ public class BTree<K extends Comparable<? super K>, V> extends java.util.Abstrac
 
     @Override
     public void clear() {
-      this.root = new LeafNode<>();
+      this.root = new LeafNode<>(null, java.util.Collections.emptyList());
       this.sz = 0;
       this.ht = 0;
     }
 
-    /** Finds the node entry containing the given search key.
-     * The tree is never modified.
-     * @return A key/value pair whose key evaluates equal to needle, or null if not found.
-     */
-    protected LeafEntry<K,V> search(Comparable<? super K> needle) {
-        Node<K,V,?> cur = this.root;
-
-        // null is returned by getChild in the leaf nodes
-        while (cur != null) {
-            int ind = cur.search(needle);
-            // positive index means it was found
-            if (ind >= 0) return cur.get(ind);
-
-            // negative index calculation to get the child index if not found
-            cur = cur.getChild(-ind - 2);
-        }
-
-        // if you get here, it means the key was not found in any node
-        return null;
-    }
-
     // annoying unchecked conversion because Map specifies the key has type Object
     @SuppressWarnings("unchecked")
-    protected LeafEntry<K,V> search(Object key) {
-        return search((Comparable<? super K>) key);
-    }
-
-    /** Finds an entry for the given key, splitting and inserting if necessary.
-     * @return An entry for this key in the tree, guaranteed not null.
-     */
-    protected LeafEntry<K,V> insert(K key) {
-        // check if we need to split the root
-        if (this.root.isFull()) {
-            InternalNode<K,V> newRoot = new InternalNode<>(this.root);
-            newRoot.add(this.root.split());
-            this.root = newRoot;
-            ++this.ht;
-        }
-
-        Node<K,V,?> cur = this.root;
-
-        // not an infinite loop, because it will eventually get to a leaf node
-        while (true) {
-            assert ! cur.isFull();
-
-            int ind = cur.searchAndSplit(key);
-            if (ind >= 0) return cur.get(ind); // found it
-
-            // at the leaf level, just insert
-            if (cur.isLeaf()) return cur.insert(-ind - 1, key, null);
-
-            cur = cur.getChild(-ind - 2); // note, child indices start from -1
-        }
+    private Entry<K,V> search(Object key) {
+        return root.search((Comparable<? super K>) key);
     }
 
     @Override
@@ -321,7 +288,7 @@ public class BTree<K extends Comparable<? super K>, V> extends java.util.Abstrac
 
     @Override
     public V get(Object key) {
-        LeafEntry<K,V> found = search(key);
+        Entry<K,V> found = search(key);
         if (found == null) return null;
         else return found.getValue();
     }
@@ -331,7 +298,12 @@ public class BTree<K extends Comparable<? super K>, V> extends java.util.Abstrac
         // putting a null value is the same as removal, but removal is faster (no splitting)
         if (value == null) return this.remove(key);
 
-        LeafEntry<K,V> found = insert(key);
+        // if the root is full, split it to get a new root
+        if (root.isFull()) {
+            root = new InternalNode<>(root, java.util.Collections.singleton(root.split()));
+        }
+
+        Entry<K,V> found = root.searchInsert(key);
         V old = found.setValue(value);
         if (old == null) ++this.sz;
         return old;
@@ -340,7 +312,7 @@ public class BTree<K extends Comparable<? super K>, V> extends java.util.Abstrac
     // equivalent to put(key, null) but avoids splits.
     @Override
     public V remove(Object key) {
-        LeafEntry<K,V> found = search(key);
+        Entry<K,V> found = search(key);
         if (found == null) return null;
 
         V old = found.setValue(null);
@@ -351,12 +323,12 @@ public class BTree<K extends Comparable<? super K>, V> extends java.util.Abstrac
     /** A class to view the key/value pair entries of the B-tree as a Set.
      * Required by AbstractMap.
      */
-    public class SetView extends java.util.AbstractSet<java.util.Map.Entry<K,V>> {
+    public class SetView extends java.util.AbstractSet<Entry<K,V>> {
         @Override
         public int size() { return BTree.this.size(); }
 
         @Override
-        public java.util.Iterator<java.util.Map.Entry<K,V>> iterator() {
+        public java.util.Iterator<Entry<K,V>> iterator() {
             return BTree.this.new Iter();
         }
 
@@ -371,56 +343,44 @@ public class BTree<K extends Comparable<? super K>, V> extends java.util.Abstrac
      * Iterators are invalidated whenever a modification is made (via a call to
      * put, for example) other than calling remove() on the iterator itself.
      */
-    public class Iter implements java.util.Iterator<java.util.Map.Entry<K,V>> {
-        // The stack stores an iterator for the items in a node of each level of the tree.
-        private java.util.Deque<java.util.Iterator<? extends LeafEntry<K,V>>> stack;
+    public class Iter implements java.util.Iterator<Entry<K,V>> {
+        // The stack stores an iterator for the items in a node of each internal level of the tree.
+        private java.util.Deque<java.util.Iterator<Entry<K,Node<K,V,?>>>> stack = null;
+        private java.util.Iterator<Entry<K,V>> stackTop = null;
         // prev is the entry that was just returned, next is the one that will be returned.
-        private LeafEntry<K,V> prev = null;
-        private LeafEntry<K,V> next = null;
+        private Entry<K,V> prev = null;
+        private Entry<K,V> next = null;
 
         /** Creates a new instance attached to the containin BTree class. */
         public Iter() {
-            stack = new java.util.ArrayDeque<>(BTree.this.height());
+            if (isEmpty()) return;
 
-            if (BTree.this.isEmpty()) return;
-
-            Node<K,V,?> cur = BTree.this.root;
-            while (cur != null) {
-                stack.addLast(cur.iterator());
-                cur = cur.getChild(-1);
-            }
-
-            next = stack.getLast().next();
-            if (next.getValue() == null) advance();
+            stack = new java.util.ArrayDeque<>(height()-1);
+            stackTop = root.iterPush(stack).iterator();
+            advance();
         }
 
         // advances to the next non-null entry, so prev will get the current value of next,
         // and next will point to the next non-null entry in the tree.
         private void advance() {
-            if (next == null)
-                throw new java.util.NoSuchElementException("end of the B-tree");
-
             prev = next;
 
             do {
-                Node<K,V,?> child = next.rightChild();
-
-                // go down the tree if there are children
-                while (child != null) {
-                    stack.addLast(child.iterator());
-                    child = child.getChild(-1);
-                }
-
-                // go back up the tree when you get to the end of a node
-                while (!stack.getLast().hasNext()) {
-                    stack.removeLast();
-                    if (stack.isEmpty()) {
-                        next = null;
-                        return;
+                if (!stackTop.hasNext()) {
+                    stackTop = null;
+                    while (!stack.getLast().hasNext()) {
+                        stack.removeLast();
+                        if (stack.isEmpty()) {
+                            next = null;
+                            return;
+                        }
                     }
+                    Entry<K,Node<K,V,?>> internal = stack.getLast().next();
+                    LeafNode<K,V> leaf = internal.getValue().iterPush(stack);
+                    stackTop = leaf.iterator();
+                    next = leaf.leftEntry(internal.getKey());
                 }
-
-                next = stack.getLast().next();
+                else next = stackTop.next();
             } while (next.getValue() == null);
         }
 
@@ -430,7 +390,9 @@ public class BTree<K extends Comparable<? super K>, V> extends java.util.Abstrac
         }
 
         @Override
-        public java.util.Map.Entry<K,V> next() {
+        public Entry<K,V> next() {
+            if (next == null)
+                throw new java.util.NoSuchElementException("end of the B-tree");
             advance();
             return prev;
         }
