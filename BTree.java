@@ -38,9 +38,9 @@
  ******************************************************************************/
 public class BTree<K extends Comparable<? super K>, V> extends java.util.AbstractMap<K,V> {
     /** Maximum number of key/value pairs in a leaf node. */
-    public static final int LeafM = 4;
+    public static final int LeafM = 128;
     /** Maximum number of key/child pairs in an internal node. */
-    public static final int InternalM = 4;
+    public static final int InternalM = 128;
 
     /** A pseudo-entry whose key is in an internal node and whose value is in a leaf node. */
     private static class InternalEntry<K extends Comparable<? super K>,V> implements Entry<K,V> {
@@ -355,7 +355,7 @@ public class BTree<K extends Comparable<? super K>, V> extends java.util.Abstrac
         public Iter() {
             if (isEmpty()) return;
 
-            stack = new java.util.ArrayDeque<>(height()-1);
+            stack = new java.util.ArrayDeque<>(height());
             stackTop = root.iterPush(stack).iterator();
             advance();
         }
@@ -368,12 +368,12 @@ public class BTree<K extends Comparable<? super K>, V> extends java.util.Abstrac
             do {
                 if (!stackTop.hasNext()) {
                     stackTop = null;
-                    while (!stack.getLast().hasNext()) {
+                    while (!stack.isEmpty() && !stack.getLast().hasNext()) {
                         stack.removeLast();
-                        if (stack.isEmpty()) {
-                            next = null;
-                            return;
-                        }
+                    }
+                    if (stack.isEmpty()) {
+                        next = null;
+                        return;
                     }
                     Entry<K,Node<K,V,?>> internal = stack.getLast().next();
                     LeafNode<K,V> leaf = internal.getValue().iterPush(stack);
