@@ -130,6 +130,9 @@ public class BTree<K extends Comparable<? super K>, V> extends java.util.Abstrac
         /** Creates a new sibling node based on the given payload and list of entries. */
         abstract protected Node<K,V,P> spawn(P payload, java.util.Collection<? extends Entry<K,P>> entries);
 
+        /** Prints the node's key and value. */
+        abstract public void printMe(String indent);
+        
         /** Splits this node and returns the to-be-promoted entry. */
         public Entry<K,Node<K,V,?>> split() {
             assert isFull();
@@ -183,6 +186,19 @@ public class BTree<K extends Comparable<? super K>, V> extends java.util.Abstrac
         @Override
         protected LeafNode<K,V> spawn(V payload, java.util.Collection<? extends Entry<K,V>> entries) {
             return new LeafNode<>(payload, entries);
+        }
+        
+         @Override
+        public void printMe(String indent) {
+            // Prints value of internal node
+            if (this.getLeft() != null)
+	            System.out.println(" [" + this.getLeft() + "]");
+
+            // Prints values of leaf nodes
+            for (int i = 0; i < this.size(); i++) {
+	            System.out.println(indent + this.get(i).getKey() +
+			                " [" + this.get(i).getValue() + "]");
+            }
         }
 
         @Override
@@ -247,6 +263,16 @@ public class BTree<K extends Comparable<? super K>, V> extends java.util.Abstrac
              java.util.Collection<? extends Entry<K,Node<K,V,?>>> entries)
         {
             return new InternalNode<>(payload, entries);
+        }
+        
+        @Override
+        public void printMe(String indent) {
+          this.getLeft().printMe(indent+"               ");
+
+          for (int i = 0; i < this.size(); i++) {
+            System.out.print(indent + this.get(i).getKey());
+            this.get(i).getValue().printMe(indent+"               ");
+          }
         }
 
         @Override
@@ -320,6 +346,10 @@ public class BTree<K extends Comparable<? super K>, V> extends java.util.Abstrac
         return old;
     }
 
+    public void print() {
+        root.printMe("");
+    }
+    
     /** A class to view the key/value pair entries of the B-tree as a Set.
      * Required by AbstractMap.
      */
